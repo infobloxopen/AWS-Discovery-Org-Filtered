@@ -1,0 +1,169 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Bootstrap Stack to create a service-managed CloudFormation StackSet that deploys the
+  'infoblox_discovery' IAM role. Targets Organizational Units (OUs) with optional
+  account filtering — include specific accounts (INTERSECTION) or exclude accounts (DIFFERENCE).
+
+Parameters:
+  ExternalId:
+    Type: String
+    Default: "f90ae844-4072-47a5-a6a3-4f900e8317df"
+    Description: External ID used by Infoblox when assuming the role
+  AccountId:
+    Type: String
+    Default: "902917483333"
+    Description: Infoblox AWS Account ID that will assume the role
+
+  TargetOUsCsv:
+    Type: String
+    AllowedPattern: "^(ou-[a-z0-9]{4,32}-[a-z0-9]{8,32}|r-[a-z0-9]{4,32})(,(ou-[a-z0-9]{4,32}-[a-z0-9]{8,32}|r-[a-z0-9]{4,32}))*$"
+    ConstraintDescription: "Must be comma-separated OU IDs (ou-xxxx-xxxxxxxx) or root IDs (r-xxxx)"
+    Description: >
+      Required: Comma-separated OU IDs (e.g. ou-abcd-12345678,ou-efgh-a1b2c3d4) or root ID (r-xxxx).
+
+  AccountFilterMode:
+    Type: String
+    AllowedValues: ["NONE", "INTERSECTION", "DIFFERENCE"]
+    Default: "NONE"
+    Description: >
+      NONE = deploy to all accounts in the OUs.
+      INTERSECTION = deploy ONLY to accounts listed in AccountFilterCsv.
+      DIFFERENCE = deploy to all accounts EXCEPT those listed in AccountFilterCsv.
+
+  AccountFilterCsv:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[0-9]{12}(,[0-9]{12})*$"
+    ConstraintDescription: "Must be empty or comma-separated 12-digit AWS Account IDs"
+    Description: >
+      Comma-separated AWS Account IDs to include or exclude (depending on AccountFilterMode).
+      Required when AccountFilterMode is INTERSECTION or DIFFERENCE. Ignored when NONE.
+
+  Regions:
+    Type: List<String>
+    Default: "us-east-1"
+    Description: One or more AWS regions for deployment (IAM is global — one region is usually enough)
+
+  AutoDeployNewAccounts:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: Automatically deploy the role to new accounts joining the target OUs
+
+Rules:
+  AccountFilterRequiresAccounts:
+    RuleCondition: !Not [ !Equals [ !Ref AccountFilterMode, "NONE" ] ]
+    Assertions:
+      - Assert: !Not [ !Equals [ !Ref AccountFilterCsv, "" ] ]
+        AssertDescription: "AccountFilterCsv must not be empty when AccountFilterMode is INTERSECTION or DIFFERENCE"
+
+Conditions:
+  UseFilter: !Not [ !Equals [ !Ref AccountFilterMode, "NONE" ] ]
+  AutoDeployEnabled: !Equals [ !Ref AutoDeployNewAccounts, "true" ]
+
+Resources:
+  DiscoveryRoleStackSet:
+    Type: AWS::CloudFormation::StackSet
+    Properties:
+      StackSetName: Infoblox-Discovery-Role
+      PermissionModel: SERVICE_MANAGED
+      AutoDeployment:
+        Enabled: !If [ AutoDeployEnabled, true, false ]
+        RetainStacksOnAccountRemoval: false
+      Capabilities:
+        - CAPABILITY_NAMED_IAM
+      TemplateBody: |
+        AWSTemplateFormatVersion: '2010-09-09'
+        Description: Infoblox infoblox_discovery IAM role with least-privilege IPAM/network discovery permissions
+        Parameters:
+          ExternalId:
+            Type: String
+          AccountId:
+            Type: String
+        Resources:
+          InfobloxDiscoveryRole:
+            Type: AWS::IAM::Role
+            Properties:
+              RoleName: infoblox_discovery
+              AssumeRolePolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                  - Effect: Allow
+                    Principal:
+                      AWS: !Sub "arn:aws:iam::${AccountId}:root"
+                    Action: sts:AssumeRole
+                    Condition:
+                      StringEquals:
+                        sts:ExternalId: !Ref ExternalId
+              Policies:
+                - PolicyName: InfobloxIPAMDiscovery
+                  PolicyDocument:
+                    Version: "2012-10-17"
+                    Statement:
+                      - Effect: Allow
+                        Action:
+                          - directconnect:DescribeDirectConnectGateways
+                          - ec2:DescribeCustomerGateways
+                          - ec2:DescribeVolumes
+                          - ec2:DescribeEgressOnlyInternetGateways
+                          - ec2:DescribeAddresses
+                          - ec2:DescribeInstances
+                          - ec2:DescribeInternetGateways
+                          - ec2:GetIpamPoolAllocations
+                          - ec2:GetIpamPoolCidrs
+                          - ec2:DescribeIpamPools
+                          - ec2:DescribeIpamScopes
+                          - ec2:DescribeIpams
+                          - ec2:DescribeNatGateways
+                          - ec2:DescribeNetworkInterfaces
+                          - ec2:DescribeRouteTables
+                          - ec2:DescribeSecurityGroups
+                          - ec2:DescribeSubnets
+                          - ec2:DescribeTransitGatewayPeeringAttachments
+                          - ec2:DescribeTransitGatewayVpcAttachments
+                          - ec2:DescribeTransitGateways
+                          - ec2:DescribeVpcEndpoints
+                          - ec2:DescribeVpcPeeringConnections
+                          - ec2:DescribeVpcs
+                          - ec2:DescribeVpnConnections
+                          - ec2:DescribeVpnGateways
+                          - elasticloadbalancing:DescribeLoadBalancers
+                          - elasticloadbalancing:DescribeListeners
+                          - elasticloadbalancing:DescribeTargetHealth
+                          - elasticloadbalancing:DescribeTargetGroups
+                          - s3:GetBucketPolicy
+                          - s3:GetBucketPublicAccessBlock
+                          - s3:ListAllMyBuckets
+                          - route53:GetHostedZone
+                          - route53:ListHostedZones
+                          - route53:ListResourceRecordSets
+                          - route53:ListTagsForResources
+                          - route53:ListQueryLoggingConfigs
+                          - route53:GetHealthCheck
+                          - route53:ListHealthChecks
+                        Resource: "*"
+              Tags:
+                - Key: CreatedBy
+                  Value: CloudFormation-StackSet
+                - Key: Purpose
+                  Value: Infoblox-Discovery
+        Outputs:
+          RoleARN:
+            Description: ARN of the created IAM role
+            Value: !GetAtt InfobloxDiscoveryRole.Arn
+      Parameters:
+        - ParameterKey: ExternalId
+          ParameterValue: !Ref ExternalId
+        - ParameterKey: AccountId
+          ParameterValue: !Ref AccountId
+      StackInstancesGroup:
+        - DeploymentTargets:
+            OrganizationalUnitIds: !Split [ ",", !Ref TargetOUsCsv ]
+            AccountFilterType: !If [ UseFilter, !Ref AccountFilterMode, !Ref "AWS::NoValue" ]
+            Accounts: !If [ UseFilter, !Split [ ",", !Ref AccountFilterCsv ], !Ref "AWS::NoValue" ]
+          Regions: !Ref Regions
+
+Outputs:
+  StackSetName:
+    Description: Name of the created StackSet
+    Value: !Ref DiscoveryRoleStackSet
